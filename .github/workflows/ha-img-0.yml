@@ -1,0 +1,229 @@
+name: HA-IMG-0 compatibility validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      HA_VERSION: "2026.9.3"
+      SOURCE_REPO: "ghcr.io/home-assistant/home-assistant"
+      DEST_IMAGE: "localhost:5000/home-assistant/ha-compat"
+      DIND_IMAGE: "registry:5000/home-assistant/ha-compat"
+      DEST_TAG: "2026.9.3-compat-gzip"
+      LAB_DIR: "/tmp/ha-img-0"
+
+    steps:
+      - name: Install inspection tools
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends skopeo jq curl gzip
+          mkdir -p "$LAB_DIR/blobs"
+          skopeo --version | tee "$LAB_DIR/skopeo-version.txt"
+          uname -a | tee "$LAB_DIR/runner-uname.txt"
+
+      - name: Start isolated temporary registry
+        run: |
+          set -euxo pipefail
+          docker network create ha-img-0
+          docker run -d --name ha-img-registry --network ha-img-0 \
+            --network-alias registry -p 5000:5000 registry:2
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:5000/v2/ && break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:5000/v2/
+
+      - name: Lock and record upstream linux amd64 image
+        id: upstream
+        run: |
+          set -euxo pipefail
+          REF="docker://${SOURCE_REPO}:${HA_VERSION}"
+          skopeo inspect --override-os linux --override-arch amd64 \
+            --format '{{.Digest}}' "$REF" | tee "$LAB_DIR/upstream-amd64-digest.txt"
+          UPSTREAM_DIGEST="$(cat "$LAB_DIR/upstream-amd64-digest.txt")"
+          echo "digest=$UPSTREAM_DIGEST" >> "$GITHUB_OUTPUT"
+          PINNED="docker://${SOURCE_REPO}@${UPSTREAM_DIGEST}"
+          skopeo inspect --raw --override-os linux --override-arch amd64 \
+            "$PINNED" > "$LAB_DIR/upstream-manifest.json"
+          skopeo inspect --config --override-os linux --override-arch amd64 \
+            "$PINNED" > "$LAB_DIR/upstream-config.json"
+          skopeo inspect --override-os linux --override-arch amd64 \
+            "$PINNED" > "$LAB_DIR/upstream-inspect.json"
+          jq . "$LAB_DIR/upstream-manifest.json"
+          jq '{created,architecture,os,config,rootfs,history}' \
+            "$LAB_DIR/upstream-config.json"
+
+      - name: Recompress zstd layers to gzip and emit Docker schema 2
+        run: |
+          set -euxo pipefail
+          PINNED="docker://${SOURCE_REPO}@${{ steps.upstream.outputs.digest }}"
+          skopeo copy \
+            --override-os linux \
+            --override-arch amd64 \
+            --format v2s2 \
+            --dest-compress-format gzip \
+            --dest-force-compress-format \
+            --dest-tls-verify=false \
+            "$PINNED" "docker://${DEST_IMAGE}:${DEST_TAG}"
+          skopeo inspect --tls-verify=false --format '{{.Digest}}' \
+            "docker://${DEST_IMAGE}:${DEST_TAG}" | tee "$LAB_DIR/converted-digest.txt"
+          skopeo inspect --raw --tls-verify=false \
+            "docker://${DEST_IMAGE}:${DEST_TAG}" > "$LAB_DIR/converted-manifest.json"
+          skopeo inspect --config --tls-verify=false \
+            "docker://${DEST_IMAGE}:${DEST_TAG}" > "$LAB_DIR/converted-config.json"
+          skopeo inspect --tls-verify=false \
+            "docker://${DEST_IMAGE}:${DEST_TAG}" > "$LAB_DIR/converted-inspect.json"
+
+      - name: Verify diffIDs, config semantics, manifest and gzip blobs
+        run: |
+          set -euxo pipefail
+          jq -S '.rootfs.diff_ids' "$LAB_DIR/upstream-config.json" \
+            > "$LAB_DIR/upstream-diffids.json"
+          jq -S '.rootfs.diff_ids' "$LAB_DIR/converted-config.json" \
+            > "$LAB_DIR/converted-diffids.json"
+          diff -u "$LAB_DIR/upstream-diffids.json" "$LAB_DIR/converted-diffids.json" \
+            | tee "$LAB_DIR/diffid-diff.txt"
+
+          JQ_CONFIG='{architecture,os,config:{Entrypoint:.config.Entrypoint,Cmd:.config.Cmd,Env:.config.Env,WorkingDir:.config.WorkingDir,User:.config.User,Labels:.config.Labels,ExposedPorts:.config.ExposedPorts,Volumes:.config.Volumes,StopSignal:.config.StopSignal,Healthcheck:.config.Healthcheck}}'
+          jq -S "$JQ_CONFIG" "$LAB_DIR/upstream-config.json" > "$LAB_DIR/upstream-semantic-config.json"
+          jq -S "$JQ_CONFIG" "$LAB_DIR/converted-config.json" > "$LAB_DIR/converted-semantic-config.json"
+          diff -u "$LAB_DIR/upstream-semantic-config.json" "$LAB_DIR/converted-semantic-config.json" \
+            | tee "$LAB_DIR/config-diff.txt"
+
+          test "$(jq '.layers | length' "$LAB_DIR/upstream-manifest.json")" \
+            = "$(jq '.layers | length' "$LAB_DIR/converted-manifest.json")"
+          test "$(jq -r '.mediaType' "$LAB_DIR/converted-manifest.json")" \
+            = 'application/vnd.docker.distribution.manifest.v2+json'
+          test "$(jq -r '.config.mediaType' "$LAB_DIR/converted-manifest.json")" \
+            = 'application/vnd.docker.container.image.v1+json'
+          test "$(jq '[.layers[] | select(.mediaType != "application/vnd.docker.image.rootfs.diff.tar.gzip")] | length' "$LAB_DIR/converted-manifest.json")" = 0
+
+          : > "$LAB_DIR/gzip-test.txt"
+          while read -r digest; do
+            file="$LAB_DIR/blobs/${digest#sha256:}.gz"
+            curl -fsSL "http://127.0.0.1:5000/v2/home-assistant/ha-compat/blobs/$digest" -o "$file"
+            gzip -t "$file"
+            printf '%s gzip-ok size=%s\n' "$digest" "$(stat -c %s "$file")" \
+              | tee -a "$LAB_DIR/gzip-test.txt"
+            rm -f "$file"
+          done < <(jq -r '.layers[].digest' "$LAB_DIR/converted-manifest.json")
+
+      - name: Start real Docker Engine 20.10 daemon
+        run: |
+          set -euxo pipefail
+          docker run --privileged -d --name ha-img-dind20 \
+            --network ha-img-0 --network-alias dind20 \
+            -e DOCKER_TLS_CERTDIR= \
+            docker:20.10.24-dind \
+            --host=tcp://0.0.0.0:2375 \
+            --insecure-registry=registry:5000
+          for i in $(seq 1 60); do
+            if docker run --rm --network ha-img-0 docker:20.10.24-cli \
+              -H tcp://dind20:2375 info >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          docker run --rm --network ha-img-0 docker:20.10.24-cli \
+            -H tcp://dind20:2375 version | tee "$LAB_DIR/docker20-version.txt"
+          grep -q 'Version: *20\.10\.24' "$LAB_DIR/docker20-version.txt"
+
+      - name: Docker 20 pull and inspect
+        run: |
+          set -euxo pipefail
+          d20() {
+            docker run --rm --network ha-img-0 docker:20.10.24-cli \
+              -H tcp://dind20:2375 "$@"
+          }
+          d20 pull "${DIND_IMAGE}:${DEST_TAG}" 2>&1 | tee "$LAB_DIR/docker20-pull.txt"
+          ! grep -qi 'invalid tar header' "$LAB_DIR/docker20-pull.txt"
+          d20 image inspect "${DIND_IMAGE}:${DEST_TAG}" \
+            | tee "$LAB_DIR/docker20-image-inspect.json"
+          test "$(jq -r '.[0].Architecture' "$LAB_DIR/docker20-image-inspect.json")" = amd64
+          test "$(jq '.[0].RootFS.Layers | length' "$LAB_DIR/docker20-image-inspect.json")" \
+            = "$(jq '.layers | length' "$LAB_DIR/converted-manifest.json")"
+
+      - name: Boot fresh Home Assistant on Docker 20.10
+        run: |
+          set -euxo pipefail
+          d20() {
+            docker run --rm --network ha-img-0 docker:20.10.24-cli \
+              -H tcp://dind20:2375 "$@"
+          }
+          d20 run -d --name ha-img-0-test \
+            --privileged \
+            --restart=no \
+            -e TZ=Asia/Shanghai \
+            -v /tmp/ha-img-0-config:/config \
+            -p 8123:8123 \
+            "${DIND_IMAGE}:${DEST_TAG}" | tee "$LAB_DIR/container-id.txt"
+
+          http=000
+          for i in $(seq 1 90); do
+            d20 ps -a | tee "$LAB_DIR/docker20-ps-latest.txt"
+            running="$(d20 inspect -f '{{.State.Running}}' ha-img-0-test)"
+            test "$running" = true
+            http="$(docker run --rm --network ha-img-0 curlimages/curl:8.10.1 \
+              -sS -o /tmp/body -w '%{http_code}' --max-time 10 \
+              http://dind20:8123/ || true)"
+            if [ "$http" != 000 ] && [ "$http" -ge 200 ] && [ "$http" -lt 500 ]; then
+              break
+            fi
+            sleep 10
+          done
+          printf '%s\n' "$http" | tee "$LAB_DIR/http-status.txt"
+          test "$http" != 000
+          test "$http" -ge 200
+          test "$http" -lt 500
+
+          d20 logs ha-img-0-test 2>&1 | tee "$LAB_DIR/ha-logs-at-ready.txt"
+          d20 top ha-img-0-test | tee "$LAB_DIR/ha-top.txt"
+          d20 inspect ha-img-0-test | tee "$LAB_DIR/ha-container-inspect.json"
+          test "$(jq -r '.[0].State.Running' "$LAB_DIR/ha-container-inspect.json")" = true
+          test "$(jq -r '.[0].RestartCount' "$LAB_DIR/ha-container-inspect.json")" = 0
+          test "$(jq '[.[0].Mounts[] | select(.Destination == "/var/run/docker.sock" or .Destination == "/run/docker.sock")] | length' "$LAB_DIR/ha-container-inspect.json")" = 0
+
+          sleep 300
+          d20 logs ha-img-0-test 2>&1 | tee "$LAB_DIR/ha-logs-after-soak.txt"
+          d20 inspect ha-img-0-test | tee "$LAB_DIR/ha-container-inspect-after-soak.json"
+          test "$(jq -r '.[0].State.Running' "$LAB_DIR/ha-container-inspect-after-soak.json")" = true
+          test "$(jq -r '.[0].RestartCount' "$LAB_DIR/ha-container-inspect-after-soak.json")" = 0
+          ! grep -Eqi 'segmentation fault|seccomp.*fatal|cgroup.*fatal|mount.*fatal' \
+            "$LAB_DIR/ha-logs-after-soak.txt"
+
+      - name: Generate audit summary
+        if: always()
+        run: |
+          set +e
+          {
+            echo '# HA-IMG-0 evidence summary'
+            echo
+            echo "- Version: $HA_VERSION"
+            echo "- Platform: linux/amd64"
+            echo "- Upstream digest: $(cat "$LAB_DIR/upstream-amd64-digest.txt" 2>/dev/null || echo unavailable)"
+            echo "- Converted digest: $(cat "$LAB_DIR/converted-digest.txt" 2>/dev/null || echo unavailable)"
+            echo "- Skopeo: $(cat "$LAB_DIR/skopeo-version.txt" 2>/dev/null || echo unavailable)"
+            echo "- HTTP 8123 status: $(cat "$LAB_DIR/http-status.txt" 2>/dev/null || echo unavailable)"
+            echo
+            echo 'Detailed manifests, configs, layer lists, gzip checks, Docker 20 version, pull output, inspect data and Home Assistant logs are included in the artifact.'
+          } | tee "$LAB_DIR/SUMMARY.md"
+          cat "$LAB_DIR/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY"
+          docker logs ha-img-dind20 > "$LAB_DIR/dind20.log" 2>&1 || true
+          docker logs ha-img-registry > "$LAB_DIR/registry.log" 2>&1 || true
+
+      - name: Upload evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ha-img-0-evidence-${{ github.run_id }}
+          path: /tmp/ha-img-0
+          if-no-files-found: warn
+          retention-days: 7
+
