@@ -162,6 +162,8 @@ jobs:
         run: |
           set -euxo pipefail
           ARCHIVE="$LAB_DIR/homeassistant-compat-${HA_VERSION}-gzip.tar"
+          RAW_ARCHIVE="$LAB_DIR/homeassistant-compat-${HA_VERSION}-raw.tar"
+          WORK="$LAB_DIR/archive-work"
           sk_archive() {
             docker run --rm --network host -v "$LAB_DIR:/out" "$SKOPEO_IMAGE" "$@"
           }
@@ -173,16 +175,33 @@ jobs:
             --dest-compress-format gzip \
             --dest-force-compress-format \
             "$PINNED" \
-            "docker-archive:/out/$(basename "$ARCHIVE"):homeassistant-compat:${HA_VERSION}-gzip"
+            "docker-archive:/out/$(basename "$RAW_ARCHIVE"):homeassistant-compat:${HA_VERSION}-gzip"
+          test -s "$RAW_ARCHIVE"
+          rm -rf "$WORK"
+          mkdir -p "$WORK"
+          tar -xf "$RAW_ARCHIVE" -C "$WORK"
+          while read -r layer; do
+            file="$WORK/$layer"
+            if gzip -t "$file" 2>/dev/null; then
+              printf '%s already-gzip\n' "$layer" | tee -a "$LAB_DIR/archive-gzip-test.txt"
+            else
+              tmp="$file.repack"
+              gzip -n -c "$file" > "$tmp"
+              mv "$tmp" "$file"
+              printf '%s repacked-gzip\n' "$layer" | tee -a "$LAB_DIR/archive-gzip-test.txt"
+            fi
+          done < <(jq -r '.[0].Layers[]' "$WORK/manifest.json")
+          config_file="$(jq -r '.[0].Config' "$WORK/manifest.json")"
+          layers="$(jq -r '.[0].Layers[]' "$WORK/manifest.json")"
+          tar -cf "$ARCHIVE" -C "$WORK" manifest.json "$config_file" $layers
           test -s "$ARCHIVE"
           sha256sum "$ARCHIVE" | tee "$LAB_DIR/archive-sha256.txt"
           tar -xOf "$ARCHIVE" manifest.json > "$LAB_DIR/archive-manifest.json"
           jq -e 'length == 1 and .[0].Config != null and (.[0].Layers | length == 22)' \
             "$LAB_DIR/archive-manifest.json"
-          : > "$LAB_DIR/archive-gzip-test.txt"
           jq -r '.[0].Layers[]' "$LAB_DIR/archive-manifest.json" | while read -r layer; do
             tar -xOf "$ARCHIVE" "$layer" | gzip -t
-            printf '%s gzip-ok\n' "$layer" | tee -a "$LAB_DIR/archive-gzip-test.txt"
+            printf '%s final-gzip-ok\n' "$layer" | tee -a "$LAB_DIR/archive-gzip-test.txt"
           done
           docker run --rm --network ha-img-0 -v "$LAB_DIR:/in:ro" docker:20.10.24-cli \
             -H tcp://dind20:2375 load -i "/in/$(basename "$ARCHIVE")" \
@@ -265,12 +284,19 @@ jobs:
           docker logs ha-img-dind20 > "$LAB_DIR/dind20.log" 2>&1 || true
           docker logs ha-img-registry > "$LAB_DIR/registry.log" 2>&1 || true
 
+      - name: Clean archive scratch
+        if: always()
+        run: |
+          rm -rf "$LAB_DIR/archive-work" "$LAB_DIR/homeassistant-compat-${HA_VERSION}-raw.tar"
+
       - name: Upload evidence artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ha-img-0-evidence-${{ github.run_id }}
-          path: /tmp/ha-img-0
+          path: |
+            /tmp/ha-img-0
+            !/tmp/ha-img-0/homeassistant-compat-*.tar
           if-no-files-found: warn
           retention-days: 7
 
