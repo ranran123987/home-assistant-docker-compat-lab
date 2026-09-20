@@ -158,6 +158,39 @@ jobs:
           test "$(jq '.[0].RootFS.Layers | length' "$LAB_DIR/docker20-image-inspect.json")" \
             = "$(jq '.layers | length' "$LAB_DIR/converted-manifest.json")"
 
+      - name: Emit Docker archive and load it with Docker 20
+        run: |
+          set -euxo pipefail
+          ARCHIVE="$LAB_DIR/homeassistant-compat-${HA_VERSION}-gzip.tar"
+          sk_archive() {
+            docker run --rm --network host -v "$LAB_DIR:/out" "$SKOPEO_IMAGE" "$@"
+          }
+          sk_archive copy \
+            --src-tls-verify=false \
+            "docker://localhost:5000/homeassistant/ha-compat:${DEST_TAG}" \
+            "docker-archive:/out/$(basename "$ARCHIVE"):homeassistant-compat:${HA_VERSION}-gzip"
+          test -s "$ARCHIVE"
+          sha256sum "$ARCHIVE" | tee "$LAB_DIR/archive-sha256.txt"
+          tar -xOf "$ARCHIVE" manifest.json > "$LAB_DIR/archive-manifest.json"
+          jq -e 'length == 1 and .[0].Config != null and (.[0].Layers | length == 22)' \
+            "$LAB_DIR/archive-manifest.json"
+          : > "$LAB_DIR/archive-gzip-test.txt"
+          jq -r '.[0].Layers[]' "$LAB_DIR/archive-manifest.json" | while read -r layer; do
+            tar -xOf "$ARCHIVE" "$layer" | gzip -t
+            printf '%s gzip-ok\n' "$layer" | tee -a "$LAB_DIR/archive-gzip-test.txt"
+          done
+          docker run --rm --network ha-img-0 -v "$LAB_DIR:/in:ro" docker:20.10.24-cli \
+            -H tcp://dind20:2375 load -i "/in/$(basename "$ARCHIVE")" \
+            | tee "$LAB_DIR/docker20-load.txt"
+          docker run --rm --network ha-img-0 docker:20.10.24-cli \
+            -H tcp://dind20:2375 image inspect "homeassistant-compat:${HA_VERSION}-gzip" \
+            | tee "$LAB_DIR/docker20-archive-image-inspect.json"
+          test "$(jq -r '.[0].Architecture' "$LAB_DIR/docker20-archive-image-inspect.json")" = amd64
+          test "$(jq -r '.[0].Os' "$LAB_DIR/docker20-archive-image-inspect.json")" = linux
+          test "$(jq -r '.[0].Config.Entrypoint[0]' "$LAB_DIR/docker20-archive-image-inspect.json")" = /init
+          test "$(jq -r '.[0].Config.WorkingDir' "$LAB_DIR/docker20-archive-image-inspect.json")" = /config
+          test "$(jq '.[0].RootFS.Layers | length' "$LAB_DIR/docker20-archive-image-inspect.json")" = 22
+
       - name: Boot fresh Home Assistant on Docker 20.10
         run: |
           set -euxo pipefail
@@ -234,4 +267,13 @@ jobs:
           name: ha-img-0-evidence-${{ github.run_id }}
           path: /tmp/ha-img-0
           if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload Docker archive artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ha-img-0-docker-archive-${{ github.run_id }}
+          path: /tmp/ha-img-0/homeassistant-compat-${{ env.HA_VERSION }}-gzip.tar
+          if-no-files-found: error
           retention-days: 7
