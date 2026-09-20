@@ -49,8 +49,12 @@ jobs:
           sk() { docker run --rm --network host "$SKOPEO_IMAGE" "$@"; }
           REF="docker://${SOURCE_REPO}:${HA_VERSION}"
           sk inspect --override-os linux --override-arch amd64 \
-            --format '{{.Digest}}' "$REF" | tee "$LAB_DIR/upstream-amd64-digest.txt"
+            --format '{{.Digest}}' "$REF" | tee "$LAB_DIR/upstream-index-digest.txt"
+          sk inspect --raw "$REF" > "$LAB_DIR/upstream-index.json"
+          jq -r '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' \
+            "$LAB_DIR/upstream-index.json" | tee "$LAB_DIR/upstream-amd64-digest.txt"
           UPSTREAM_DIGEST="$(cat "$LAB_DIR/upstream-amd64-digest.txt")"
+          test "$(grep -c '^sha256:' "$LAB_DIR/upstream-amd64-digest.txt")" = 1
           echo "digest=$UPSTREAM_DIGEST" >> "$GITHUB_OUTPUT"
           PINNED="docker://${SOURCE_REPO}@${UPSTREAM_DIGEST}"
           sk inspect --raw --override-os linux --override-arch amd64 \
@@ -211,6 +215,7 @@ jobs:
             echo
             echo "- Version: $HA_VERSION"
             echo "- Platform: linux/amd64"
+            echo "- Upstream index digest: $(cat "$LAB_DIR/upstream-index-digest.txt" 2>/dev/null || echo unavailable)"
             echo "- Upstream digest: $(cat "$LAB_DIR/upstream-amd64-digest.txt" 2>/dev/null || echo unavailable)"
             echo "- Converted digest: $(cat "$LAB_DIR/converted-digest.txt" 2>/dev/null || echo unavailable)"
             echo "- Skopeo: $(cat "$LAB_DIR/skopeo-version.txt" 2>/dev/null || echo unavailable)"
