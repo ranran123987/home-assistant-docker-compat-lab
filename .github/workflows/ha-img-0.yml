@@ -192,8 +192,9 @@ jobs:
             fi
           done < <(jq -r '.[0].Layers[]' "$WORK/manifest.json")
           config_file="$(jq -r '.[0].Config' "$WORK/manifest.json")"
-          layers="$(jq -r '.[0].Layers[]' "$WORK/manifest.json")"
-          tar -cf "$ARCHIVE" -C "$WORK" manifest.json "$config_file" $layers
+          mapfile -t layer_paths < <(jq -r '.[0].Layers[]' "$WORK/manifest.json" | awk '!seen[$0]++')
+          printf 'unique-physical-layers=%s manifest-layer-refs=%s\n' "${#layer_paths[@]}" "$(jq '.[0].Layers | length' "$WORK/manifest.json")" | tee "$LAB_DIR/archive-layer-counts.txt"
+          tar -cf "$ARCHIVE" -C "$WORK" manifest.json "$config_file" "${layer_paths[@]}"
           test -s "$ARCHIVE"
           sha256sum "$ARCHIVE" | tee "$LAB_DIR/archive-sha256.txt"
           tar -xOf "$ARCHIVE" manifest.json > "$LAB_DIR/archive-manifest.json"
