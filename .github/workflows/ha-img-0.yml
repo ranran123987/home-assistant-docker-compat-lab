@@ -17,15 +17,17 @@ jobs:
       DIND_IMAGE: "registry:5000/home-assistant/ha-compat"
       DEST_TAG: "2026.9.3-compat-gzip"
       LAB_DIR: "/tmp/ha-img-0"
+      SKOPEO_IMAGE: "quay.io/skopeo/stable:v1.23.0"
 
     steps:
       - name: Install inspection tools
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends skopeo jq curl gzip
+          sudo apt-get install -y --no-install-recommends jq curl gzip
           mkdir -p "$LAB_DIR/blobs"
-          skopeo --version | tee "$LAB_DIR/skopeo-version.txt"
+          docker pull "$SKOPEO_IMAGE"
+          docker run --rm "$SKOPEO_IMAGE" --version | tee "$LAB_DIR/skopeo-version.txt"
           uname -a | tee "$LAB_DIR/runner-uname.txt"
 
       - name: Start isolated temporary registry
@@ -44,17 +46,18 @@ jobs:
         id: upstream
         run: |
           set -euxo pipefail
+          sk() { docker run --rm --network host "$SKOPEO_IMAGE" "$@"; }
           REF="docker://${SOURCE_REPO}:${HA_VERSION}"
-          skopeo inspect --override-os linux --override-arch amd64 \
+          sk inspect --override-os linux --override-arch amd64 \
             --format '{{.Digest}}' "$REF" | tee "$LAB_DIR/upstream-amd64-digest.txt"
           UPSTREAM_DIGEST="$(cat "$LAB_DIR/upstream-amd64-digest.txt")"
           echo "digest=$UPSTREAM_DIGEST" >> "$GITHUB_OUTPUT"
           PINNED="docker://${SOURCE_REPO}@${UPSTREAM_DIGEST}"
-          skopeo inspect --raw --override-os linux --override-arch amd64 \
+          sk inspect --raw --override-os linux --override-arch amd64 \
             "$PINNED" > "$LAB_DIR/upstream-manifest.json"
-          skopeo inspect --config --override-os linux --override-arch amd64 \
+          sk inspect --config --override-os linux --override-arch amd64 \
             "$PINNED" > "$LAB_DIR/upstream-config.json"
-          skopeo inspect --override-os linux --override-arch amd64 \
+          sk inspect --override-os linux --override-arch amd64 \
             "$PINNED" > "$LAB_DIR/upstream-inspect.json"
           jq . "$LAB_DIR/upstream-manifest.json"
           jq '{created,architecture,os,config,rootfs,history}' \
@@ -63,8 +66,9 @@ jobs:
       - name: Recompress zstd layers to gzip and emit Docker schema 2
         run: |
           set -euxo pipefail
+          sk() { docker run --rm --network host "$SKOPEO_IMAGE" "$@"; }
           PINNED="docker://${SOURCE_REPO}@${{ steps.upstream.outputs.digest }}"
-          skopeo copy \
+          sk copy \
             --override-os linux \
             --override-arch amd64 \
             --format v2s2 \
@@ -72,13 +76,13 @@ jobs:
             --dest-force-compress-format \
             --dest-tls-verify=false \
             "$PINNED" "docker://${DEST_IMAGE}:${DEST_TAG}"
-          skopeo inspect --tls-verify=false --format '{{.Digest}}' \
+          sk inspect --tls-verify=false --format '{{.Digest}}' \
             "docker://${DEST_IMAGE}:${DEST_TAG}" | tee "$LAB_DIR/converted-digest.txt"
-          skopeo inspect --raw --tls-verify=false \
+          sk inspect --raw --tls-verify=false \
             "docker://${DEST_IMAGE}:${DEST_TAG}" > "$LAB_DIR/converted-manifest.json"
-          skopeo inspect --config --tls-verify=false \
+          sk inspect --config --tls-verify=false \
             "docker://${DEST_IMAGE}:${DEST_TAG}" > "$LAB_DIR/converted-config.json"
-          skopeo inspect --tls-verify=false \
+          sk inspect --tls-verify=false \
             "docker://${DEST_IMAGE}:${DEST_TAG}" > "$LAB_DIR/converted-inspect.json"
 
       - name: Verify diffIDs, config semantics, manifest and gzip blobs
@@ -226,4 +230,3 @@ jobs:
           path: /tmp/ha-img-0
           if-no-files-found: warn
           retention-days: 7
-
