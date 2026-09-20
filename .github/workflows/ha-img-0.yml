@@ -165,9 +165,14 @@ jobs:
           sk_archive() {
             docker run --rm --network host -v "$LAB_DIR:/out" "$SKOPEO_IMAGE" "$@"
           }
+          PINNED="docker://${SOURCE_REPO}@${{ steps.upstream.outputs.digest }}"
           sk_archive copy \
-            --src-tls-verify=false \
-            "docker://localhost:5000/homeassistant/ha-compat:${DEST_TAG}" \
+            --override-os linux \
+            --override-arch amd64 \
+            --format v2s2 \
+            --dest-compress-format gzip \
+            --dest-force-compress-format \
+            "$PINNED" \
             "docker-archive:/out/$(basename "$ARCHIVE"):homeassistant-compat:${HA_VERSION}-gzip"
           test -s "$ARCHIVE"
           sha256sum "$ARCHIVE" | tee "$LAB_DIR/archive-sha256.txt"
