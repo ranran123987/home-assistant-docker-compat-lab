@@ -203,9 +203,14 @@ jobs:
             tar -xOf "$ARCHIVE" "$layer" | gzip -t
             printf '%s final-gzip-ok\n' "$layer" | tee -a "$LAB_DIR/archive-gzip-test.txt"
           done
+          set +e
           docker run --rm --network ha-img-0 -v "$LAB_DIR:/in:ro" docker:20.10.24-cli \
             -H tcp://dind20:2375 load -i "/in/$(basename "$ARCHIVE")" \
-            | tee "$LAB_DIR/docker20-load.txt"
+            2>&1 | tee "$LAB_DIR/docker20-load.txt"
+          load_status=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$load_status" | tee "$LAB_DIR/docker20-load-exit.txt"
+          test "$load_status" = 0
           docker run --rm --network ha-img-0 docker:20.10.24-cli \
             -H tcp://dind20:2375 image inspect "homeassistant-compat:${HA_VERSION}-gzip" \
             | tee "$LAB_DIR/docker20-archive-image-inspect.json"
