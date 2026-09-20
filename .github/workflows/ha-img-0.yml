@@ -17,7 +17,7 @@ jobs:
       DIND_IMAGE: "registry:5000/home-assistant/ha-compat"
       DEST_TAG: "2026.9.3-compat-gzip"
       LAB_DIR: "/tmp/ha-img-0"
-      SKOPEO_IMAGE: "quay.io/skopeo/stable:v1.23.0"
+      SKOPEO_IMAGE: "quay.io/skopeo/stable:latest"
 
     steps:
       - name: Install inspection tools
