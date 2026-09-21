@@ -1,5 +1,9 @@
 # Home Assistant Legacy Docker Compatibility Lab
 
+[![HA Compatibility Validation](https://github.com/ranran123987/home-assistant-docker-compat-lab/actions/workflows/ha-img-0.yml/badge.svg)](https://github.com/ranran123987/home-assistant-docker-compat-lab/actions/workflows/ha-img-0.yml)
+[![License: MIT](https://img.shields.io/github/license/ranran123987/home-assistant-docker-compat-lab)](https://github.com/ranran123987/home-assistant-docker-compat-lab/blob/main/LICENSE)
+[![Latest Release](https://img.shields.io/github/v/release/ranran123987/home-assistant-docker-compat-lab)](https://github.com/ranran123987/home-assistant-docker-compat-lab/releases/latest)
+
 [English](#english) | [中文](#中文)
 
 An unofficial GitHub Actions workflow for converting official Home Assistant container images into a format that can be tested and loaded on older Docker Engine 20.10.x environments.
