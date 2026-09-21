@@ -2,6 +2,12 @@ name: HA-IMG-0 compatibility validation
 
 on:
   workflow_dispatch:
+    inputs:
+      ha_version:
+        description: "Home Assistant version, e.g. 2026.9.3"
+        required: true
+        default: "2026.9.3"
+        type: string
 
 permissions:
   contents: read
@@ -11,11 +17,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      HA_VERSION: "2026.9.3"
+      HA_VERSION: ${{ inputs.ha_version }}
       SOURCE_REPO: "ghcr.io/home-assistant/home-assistant"
       DEST_IMAGE: "localhost:5000/home-assistant/ha-compat"
       DIND_IMAGE: "registry:5000/home-assistant/ha-compat"
-      DEST_TAG: "2026.9.3-compat-gzip"
+      DEST_TAG: ${{ inputs.ha_version }}-compat-gzip
       LAB_DIR: "/tmp/ha-img-0"
       SKOPEO_IMAGE: "quay.io/skopeo/stable:latest"
 
